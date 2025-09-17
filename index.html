@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WhatsApp-ish Chat · Supabase · GitHub Pages</title>
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    /* Simple scrollbar */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900">
+  <!-- App -->
+  <div id="app" class="h-screen w-screen grid grid-cols-1 lg:grid-cols-[360px_1fr]">
+    <!-- Sidebar -->
+    <aside class="bg-white border-r border-slate-200 flex flex-col">
+      <div class="p-4 flex items-center gap-3 border-b">
+        <div class="h-10 w-10 rounded-2xl bg-emerald-500 text-white grid place-items-center font-bold">W</div>
+        <div>
+          <div class="text-lg font-semibold">WhatsApp-ish</div>
+          <div class="text-xs text-slate-500">Supabase · Realtime</div>
+        </div>
+      </div>
+
+      <!-- Login / Profile -->
+      <div id="authBox" class="p-4 border-b space-y-2">
+        <label class="block text-sm font-medium">Choose a username</label>
+        <div class="flex gap-2">
+          <input id="usernameInput" class="flex-1 rounded-xl border px-3 py-2" placeholder="e.g. raymond" />
+          <button id="loginBtn" class="rounded-xl bg-emerald-600 text-white px-4 py-2">Use</button>
+        </div>
+        <p class="text-xs text-slate-500">Unique across the app. Reuse to “sign back in”.</p>
+        <div id="meTag" class="hidden text-sm">
+          Signed in as <span id="meName" class="font-semibold"></span>
+        </div>
+      </div>
+
+      <!-- Search -->
+      <div class="p-3">
+        <input id="searchInput" class="w-full rounded-xl border px-3 py-2" placeholder="Search users…" />
+      </div>
+
+      <!-- User list -->
+      <div id="userList" class="flex-1 overflow-y-auto">
+        <!-- populated by JS -->
+      </div>
+
+      <!-- Footer -->
+      <div class="p-3 text-xs text-slate-500 border-t">
+        Presence: <span id="presenceCount">0</span> online
+      </div>
+    </aside>
+
+    <!-- Chat pane -->
+    <main class="flex flex-col">
+      <!-- Header -->
+      <header class="h-[64px] border-b bg-white flex items-center gap-3 px-4">
+        <div id="chatAvatar" class="h-10 w-10 rounded-2xl bg-slate-300 grid place-items-center text-white font-bold">?</div>
+        <div class="flex-1">
+          <div id="chatTitle" class="font-semibold">No chat selected</div>
+          <div id="chatSubtitle" class="text-xs text-slate-500">Select a user to start messaging</div>
+        </div>
+      </header>
+
+      <!-- Messages -->
+      <section id="messages" class="flex-1 overflow-y-auto p-4 space-y-2 bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22><rect width=%2248%22 height=%2248%22 fill=%22%23f8fafc%22/><circle cx=%2212%22 cy=%2212%22 r=%221%22 fill=%22%23e2e8f0%22/></svg>')]">
+        <!-- bubbles injected here -->
+      </section>
+
+      <!-- Composer -->
+      <footer class="p-3 bg-white border-t">
+        <form id="composer" class="flex gap-2">
+          <input id="messageInput" class="flex-1 rounded-2xl border px-4 py-3" placeholder="Type a message" autocomplete="off" />
+          <button class="rounded-2xl px-5 py-3 bg-emerald-600 text-white font-medium">Send</button>
+        </form>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // --- CONFIG: replace with your Supabase project values ---
+    const SUPABASE_URL = "YOUR_SUPABASE_URL";
+    const SUPABASE_ANON = "YOUR_SUPABASE_ANON_KEY";
+
+    // --- Supabase client ---
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+    // --- State ---
+    let me = JSON.parse(localStorage.getItem("wa_me") || "null"); // { id, username }
+    let users = [];         // [{id, username, ...}]
+    let activePeer = null;  // selected user {id, username}
+    let msgSub = null;      // realtime subscription for messages
+    let presenceChannel = null;
+    const $ = (id) => document.getElementById(id);
+
+    // UI elements
+    const authBox = $("authBox");
+    const usernameInput = $("usernameInput");
+    const loginBtn = $("loginBtn");
+    const meTag = $("meTag");
+    const meName = $("meName");
+    const userList = $("userList");
+    const searchInput = $("searchInput");
+    const messagesEl = $("messages");
+    const composer = $("composer");
+    const messageInput = $("messageInput");
+    const chatTitle = $("chatTitle");
+    const chatSubtitle = $("chatSubtitle");
+    const chatAvatar = $("chatAvatar");
+    const presenceCount = $("presenceCount");
+
+    // Helpers
+    const avatarInitial = (name) => (name?.[0] || "?").toUpperCase();
+    const timeShort = (iso) => new Date(iso).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+
+    function setMe(u) {
+      me = u;
+      localStorage.setItem("wa_me", JSON.stringify(me));
+      meName.textContent = me.username;
+      meTag.classList.remove("hidden");
+      usernameInput.value = me.username;
+    }
+
+    function setActivePeer(u) {
+      activePeer = u;
+      chatTitle.textContent = u ? u.username : "No chat selected";
+      chatSubtitle.textContent = u ? "Direct messages" : "Select a user to start messaging";
+      chatAvatar.textContent = avatarInitial(u?.username);
+      chatAvatar.classList.toggle("bg-emerald-500", !!u);
+      chatAvatar.classList.toggle("bg-slate-300", !u);
+      renderMessages([]); // clear while loading
+      if (u && me) {
+        loadConversation(me.id, u.id);
+        subscribeToConversation(me.id, u.id);
+      } else {
+        unsubscribeMessages();
+      }
+    }
+
+    function bubble({mine, text, at}) {
+      const wrap = document.createElement("div");
+      wrap.className = `flex ${mine ? "justify-end" : "justify-start"} my-1`;
+      const b = document.createElement("div");
+      b.className = `max-w-[75%] rounded-2xl px-4 py-2 shadow ${mine ? "bg-emerald-600 text-white rounded-br-sm" : "bg-white rounded-bl-sm"}`;
+      const p = document.createElement("div"); p.textContent = text;
+      const meta = document.createElement("div");
+      meta.className = `text-[10px] mt-1 ${mine ? "text-emerald-50/80" : "text-slate-500"}`;
+      meta.textContent = timeShort(at);
+      b.appendChild(p); b.appendChild(meta);
+      wrap.appendChild(b);
+      return wrap;
+    }
+
+    function renderMessages(rows) {
+      messagesEl.innerHTML = "";
+      rows.forEach(r => {
+        messagesEl.appendChild(bubble({
+          mine: r.sender_id === me.id,
+          text: r.content,
+          at: r.created_at
+        }));
+      });
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function loadUsers() {
+      const q = searchInput.value?.trim();
+      let query = supabase.from('users').select('*').order('username', {ascending: true}).limit(200);
+      if (q) query = query.ilike('username', `%${q}%`);
+      const { data, error } = await query;
+      if (error) { console.error(error); return; }
+      users = data.filter(u => me ? u.id !== me.id : true);
+      drawUserList();
+    }
+
+    function drawUserList() {
+      userList.innerHTML = "";
+      if (!users.length) {
+        userList.innerHTML = `<div class="px-4 py-6 text-sm text-slate-500">No users yet. Ask a friend to pick a username, or search again.</div>`;
+        return;
+      }
+      users.forEach(u => {
+        const row = document.createElement("button");
+        row.className = "w-full text-left px-4 py-3 hover:bg-slate-50 flex items-center gap-3";
+        row.innerHTML = `
+          <div class="h-10 w-10 rounded-2xl bg-slate-300 text-white grid place-items-center font-bold">${avatarInitial(u.username)}</div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <div class="font-medium truncate">${u.username}</div>
+              <span id="presence-${u.id}" class="hidden text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">online</span>
+            </div>
+            <div class="text-xs text-slate-500 truncate">Tap to chat</div>
+          </div>
+        `;
+        row.addEventListener("click", () => setActivePeer(u));
+        userList.appendChild(row);
+      });
+      renderPresenceBadges();
+    }
+
+    async function ensureUsername(name) {
+      name = name.trim().toLowerCase();
+      if (!name || name.length < 2) throw new Error("Username must be at least 2 characters.");
+      // Try insert; if unique violation, fetch existing
+      const insert = await supabase.from('users').insert({ username: name }).select().single();
+      if (insert.data) return insert.data;
+      // fallback: fetch existing
+      const { data, error } = await supabase.from('users').select('*').eq('username', name).single();
+      if (error || !data) throw (insert.error || error || new Error("Unable to claim username"));
+      return data;
+    }
+
+    async function loadConversation(aId, bId) {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .or(`and(sender_id.eq.${aId},recipient_id.eq.${bId}),and(sender_id.eq.${bId},recipient_id.eq.${aId})`)
+        .order('created_at', { ascending: true })
+        .limit(500);
+      if (error) { console.error(error); return; }
+      renderMessages(data);
+    }
+
+    function unsubscribeMessages() {
+      if (msgSub) {
+        supabase.removeChannel(msgSub);
+        msgSub = null;
+      }
+    }
+
+    function subscribeToConversation(aId, bId) {
+      unsubscribeMessages();
+      msgSub = supabase
+        .channel(`messages_${aId}_${bId}`)
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `or(and(sender_id.eq.${aId},recipient_id.eq.${bId}),and(sender_id.eq.${bId},recipient_id.eq.${aId}))`
+        }, (payload) => {
+          const r = payload.new;
+          // Append only if it's part of the open chat
+          if (!activePeer) return;
+          if (!((r.sender_id === aId && r.recipient_id === bId) || (r.sender_id === bId && r.recipient_id === aId))) return;
+          messagesEl.appendChild(bubble({
+            mine: r.sender_id === me.id,
+            text: r.content,
+            at: r.created_at
+          }));
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        })
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            // ok
+          }
+        });
+    }
+
+    async function sendMessage(text) {
+      if (!me || !activePeer) return;
+      const payload = {
+        sender_id: me.id,
+        recipient_id: activePeer.id,
+        content: text
+      };
+      const { error } = await supabase.from('messages').insert(payload);
+      if (error) {
+        console.error(error);
+        alert("Failed to send message.");
+      }
+    }
+
+    // Presence via Realtime Presence (not tied to Auth; we use our user.id as the key)
+    function setupPresence() {
+      if (presenceChannel) supabase.removeChannel(presenceChannel);
+      presenceChannel = supabase.channel('presence', {
+        config: { presence: { key: me?.id || `guest-${crypto.randomUUID()}` } }
+      });
+
+      presenceChannel.on('presence', { event: 'sync' }, () => {
+        renderPresenceBadges();
+      });
+
+      presenceChannel.subscribe(async (status) => {
+        if (status === 'SUBSCRIBED' && me) {
+          presenceChannel.track({ username: me.username });
+        }
+      });
+    }
+
+    function getPresenceState() {
+      if (!presenceChannel) return {};
+      const state = presenceChannel.presenceState();
+      // state looks like { "<key>": [{username: "..."}], ... }
+      return state || {};
+    }
+
+    function renderPresenceBadges() {
+      const state = getPresenceState();
+      const keys = Object.keys(state);
+      presenceCount.textContent = keys.length;
+      // flip badges for known users
+      users.forEach(u => {
+        const el = document.getElementById(`presence-${u.id}`);
+        if (!el) return;
+        // Our presence key is user.id, so if present, mark online
+        const online = !!state[u.id];
+        el.classList.toggle("hidden", !online);
+      });
+    }
+
+    // Events
+    loginBtn.addEventListener("click", async () => {
+      try {
+        const u = await ensureUsername(usernameInput.value);
+        setMe(u);
+        await loadUsers();
+        setupPresence();
+      } catch (e) {
+        alert(e.message || "Unable to set username.");
+      }
+    });
+
+    searchInput.addEventListener("input", () => {
+      // simple client-side debounce
+      clearTimeout(searchInput._t);
+      searchInput._t = setTimeout(loadUsers, 200);
+    });
+
+    composer.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = messageInput.value.trim();
+      if (!text) return;
+      messageInput.value = "";
+      await sendMessage(text);
+    });
+
+    // Boot
+    (async function init() {
+      if (me) {
+        setMe(me);
+      }
+      await loadUsers();
+      setupPresence();
+    })();
+  </script>
+</body>
+</html>
