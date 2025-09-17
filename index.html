@@ -78,16 +78,13 @@
     const SUPABASE_URL  = "https://czkbjqoxiynoajfftoyq.supabase.co";
     const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6a2JqcW94aXlub2FqZmZ0b3lxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgwNzUxOTMsImV4cCI6MjA3MzY1MTE5M30.0sBWp1GLgrnD_6gsKB4L923bFCVAHcLWuq-5U0SRgi8";
 
-    // ✅ Fix for your error:
-    // Make absolutely sure the URL string includes "https://" and has no trailing spaces/newlines.
-    // The two consts above are valid and will not trigger "Invalid supabaseUrl".
-
+    // Create client (ensure URL includes https:// and no extra spaces)
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
     // ----- STATE -----
     let me = JSON.parse(localStorage.getItem("wa_me") || "null"); // { id, username }
     let users = [];              // list of other users
-    let activePeer = null;       // user object of the open chat
+    let activePeer = null;       // user object for the open chat
     let msgChannel = null;       // realtime channel for messages
     let presenceChannel = null;  // realtime presence
 
@@ -116,6 +113,10 @@
       sendBtn.disabled = !on;
     }
 
+    function scrollMessagesToBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight; // element-only scroll (page stays fixed)
+    }
+
     function setMe(u) {
       me = u;
       localStorage.setItem("wa_me", JSON.stringify(me));
@@ -134,7 +135,7 @@
       enableComposer(!!u && !!me);
       if (u && me) {
         loadConversation(me.id, u.id);
-        subscribeMessages(); // subscribe to all inserts; filter client-side
+        subscribeMessages(); // subscribe to inserts; filter client-side
       } else {
         unsubscribeMessages();
       }
@@ -161,7 +162,7 @@
           at: r.created_at
         }));
       });
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollMessagesToBottom();
     }
 
     async function loadUsers() {
@@ -199,6 +200,7 @@
     async function ensureUsername(name) {
       name = (name || "").trim().toLowerCase();
       if (!name || name.length < 2) throw new Error("Username must be at least 2 characters.");
+      // Try insert; on unique violation, fetch existing
       const insert = await supabase.from('users').insert({ username: name }).select().single();
       if (insert.data) return insert.data;
       const { data, error } = await supabase.from('users').select('*').eq('username', name).single();
@@ -232,7 +234,7 @@
     }
 
     function subscribeMessages() {
-      // Subscribe to ALL message inserts; filter in callback for simplicity/compat.
+      // Subscribe to all message inserts; filter in callback for simplicity/compat.
       unsubscribeMessages();
       msgChannel = supabase
         .channel('messages_inserts')
@@ -243,12 +245,13 @@
             (r.sender_id === me.id && r.recipient_id === activePeer.id) ||
             (r.sender_id === activePeer.id && r.recipient_id === me.id);
           if (!isThisDM) return;
+
           messagesEl.appendChild(bubble({
             mine: r.sender_id === me.id,
             text: r.content,
             at: r.created_at
           }));
-          messagesEl.scrollTop = messagesEl.scrollHeight;
+          scrollMessagesToBottom();
         })
         .subscribe();
     }
@@ -279,7 +282,7 @@
       users.forEach(u => {
         const el = document.getElementById(`presence-${u.id}`);
         if (!el) return;
-        const isOnline = !!state[u.id];
+        const isOnline = !!state[u.id]; // presence key equals user.id for logged-in users
         el.classList.toggle("hidden", !isOnline);
       });
     }
