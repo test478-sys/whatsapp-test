@@ -64,7 +64,7 @@ body{
 /* User list scrolls independently */
 .user-list{
   flex:1; overflow:auto; min-height:0;
-  overscroll-behavior: contain; /* stop scroll chaining to body */
+  overscroll-behavior: contain; /* stop scroll chaining to page */
 }
 .user-row{
   width:100%; border:0; background:transparent; text-align:left;
@@ -78,9 +78,16 @@ body{
 .avatar.small{height:36px; width:36px; border-radius:12px}
 .avatar-on{background:var(--brand)}
 .u-meta{min-width:0; flex:1}
-.u-name{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.u-name{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:6px}
 .u-sub{font-size:12px; color:var(--muted)}
-.badge{font-size:10px; padding:2px 6px; border-radius:999px; background:#daf5ea; color:#065f46; margin-left:6px}
+.badge{
+  font-size:10px; padding:2px 6px; border-radius:999px; background:#daf5ea; color:#065f46;
+}
+.badge-unread{
+  font-size:10px; padding:2px 6px; border-radius:999px;
+  background:#ef4444; color:#fff; font-weight:700;
+  min-width:22px; text-align:center; line-height:1.3;
+}
 .footer{padding:10px 12px; font-size:12px; color:var(--muted); border-top:1px solid var(--line)}
 
 /* Chat column (fixed height; only messages scroll) */
