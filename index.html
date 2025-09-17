@@ -77,16 +77,16 @@
     // ----- SUPABASE CONFIG (your actual project) -----
     const SUPABASE_URL  = "https://czkbjqoxiynoajfftoyq.supabase.co";
     const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6a2JqcW94aXlub2FqZmZ0b3lxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTgwNzUxOTMsImV4cCI6MjA3MzY1MTE5M30.0sBWp1GLgrnD_6gsKB4L923bFCVAHcLWuq-5U0SRgi8";
-
-    // Create client (ensure URL includes https:// and no extra spaces)
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
     // ----- STATE -----
     let me = JSON.parse(localStorage.getItem("wa_me") || "null"); // { id, username }
-    let users = [];              // list of other users
-    let activePeer = null;       // user object for the open chat
-    let msgChannel = null;       // realtime channel for messages
-    let presenceChannel = null;  // realtime presence
+    let users = [];                     // other users
+    let activePeer = null;              // open chat user
+    let msgChannel = null;              // realtime channel
+    let presenceChannel = null;         // presence channel
+    let unreadCounts = {};              // { [userId]: number }
+    let lastReads = {};                 // { [peerId]: isoString } per current me
 
     // ----- DOM -----
     const $ = (id) => document.getElementById(id);
@@ -107,15 +107,27 @@
     // ----- HELPERS -----
     const avatarInitial = (name) => (name?.[0] || "?").toUpperCase();
     const timeShort = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const EPOCH = "1970-01-01T00:00:00.000Z";
 
-    function enableComposer(on) {
-      messageInput.disabled = !on;
-      sendBtn.disabled = !on;
+    function readsKey() { return me ? `wa_reads_${me.id}` : "wa_reads_anon`; }
+    function loadReads() {
+      if (!me) { lastReads = {}; return; }
+      try { lastReads = JSON.parse(localStorage.getItem(readsKey()) || "{}"); } catch { lastReads = {}; }
+    }
+    function saveReads() {
+      if (!me) return;
+      localStorage.setItem(readsKey(), JSON.stringify(lastReads));
+    }
+    function getLastRead(peerId) { return lastReads[peerId] || EPOCH; }
+    function markRead(peerId) {
+      lastReads[peerId] = new Date().toISOString();
+      saveReads();
+      unreadCounts[peerId] = 0;
+      renderUnreadBadges();
     }
 
-    function scrollMessagesToBottom() {
-      messagesEl.scrollTop = messagesEl.scrollHeight; // element-only scroll (page stays fixed)
-    }
+    function enableComposer(on) { messageInput.disabled = !on; sendBtn.disabled = !on; }
+    function scrollMessagesToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
 
     function setMe(u) {
       me = u;
@@ -123,6 +135,7 @@
       meName.textContent = me.username;
       meTag.classList.remove("hidden");
       usernameInput.value = me.username;
+      loadReads();
     }
 
     function setActivePeer(u) {
@@ -133,9 +146,13 @@
       chatAvatar.classList.toggle("avatar-on", !!u);
       messagesEl.innerHTML = "";
       enableComposer(!!u && !!me);
+
       if (u && me) {
-        loadConversation(me.id, u.id);
-        subscribeMessages(); // subscribe to inserts; filter client-side
+        loadConversation(me.id, u.id).then(() => {
+          // When you open a chat, mark it read
+          markRead(u.id);
+        });
+        subscribeMessages(); // inserts across table; we'll filter per event
       } else {
         unsubscribeMessages();
       }
@@ -173,7 +190,8 @@
       if (error) { console.error(error); return; }
       users = (data || []).filter(u => me ? u.id !== me.id : true);
       drawUserList();
-      renderPresenceBadges(); // refresh online badges after list changes
+      renderPresenceBadges();
+      await refreshUnreadCounts();  // compute & paint unread after list loads
     }
 
     function drawUserList() {
@@ -188,19 +206,23 @@
         row.innerHTML = `
           <div class="avatar small">${avatarInitial(u.username)}</div>
           <div class="u-meta">
-            <div class="u-name">${u.username} <span id="presence-${u.id}" class="badge hidden">online</span></div>
+            <div class="u-name">
+              ${u.username}
+              <span id="unread-${u.id}" class="badge-unread hidden">0</span>
+              <span id="presence-${u.id}" class="badge hidden">online</span>
+            </div>
             <div class="u-sub">Tap to chat</div>
           </div>
         `;
         row.addEventListener("click", () => setActivePeer(u));
         userList.appendChild(row);
       });
+      renderUnreadBadges();
     }
 
     async function ensureUsername(name) {
       name = (name || "").trim().toLowerCase();
       if (!name || name.length < 2) throw new Error("Username must be at least 2 characters.");
-      // Try insert; on unique violation, fetch existing
       const insert = await supabase.from('users').insert({ username: name }).select().single();
       if (insert.data) return insert.data;
       const { data, error } = await supabase.from('users').select('*').eq('username', name).single();
@@ -234,24 +256,35 @@
     }
 
     function subscribeMessages() {
-      // Subscribe to all message inserts; filter in callback for simplicity/compat.
       unsubscribeMessages();
       msgChannel = supabase
         .channel('messages_inserts')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
-          if (!me || !activePeer) return;
+          if (!me) return;
           const r = payload.new;
-          const isThisDM =
-            (r.sender_id === me.id && r.recipient_id === activePeer.id) ||
-            (r.sender_id === activePeer.id && r.recipient_id === me.id);
-          if (!isThisDM) return;
 
-          messagesEl.appendChild(bubble({
-            mine: r.sender_id === me.id,
-            text: r.content,
-            at: r.created_at
-          }));
-          scrollMessagesToBottom();
+          // If a new message is addressed to me and NOT the open chat, bump unread
+          if (r.recipient_id === me.id && (!activePeer || r.sender_id !== activePeer.id)) {
+            unreadCounts[r.sender_id] = (unreadCounts[r.sender_id] || 0) + 1;
+            updateUnreadBadge(r.sender_id);
+          }
+
+          // If it's part of the open DM, render bubble + keep read
+          if (activePeer) {
+            const isThisDM =
+              (r.sender_id === me.id && r.recipient_id === activePeer.id) ||
+              (r.sender_id === activePeer.id && r.recipient_id === me.id);
+            if (isThisDM) {
+              messagesEl.appendChild(bubble({
+                mine: r.sender_id === me.id,
+                text: r.content,
+                at: r.created_at
+              }));
+              scrollMessagesToBottom();
+              // mark read for active conversation
+              if (r.sender_id === activePeer.id) markRead(activePeer.id);
+            }
+          }
         })
         .subscribe();
     }
@@ -271,9 +304,7 @@
       });
     }
 
-    function presenceState() {
-      return presenceChannel ? (presenceChannel.presenceState() || {}) : {};
-    }
+    function presenceState() { return presenceChannel ? (presenceChannel.presenceState() || {}) : {}; }
 
     function renderPresenceBadges() {
       const state = presenceState(); // { "<key>": [{username: "..."}], ... }
@@ -282,12 +313,62 @@
       users.forEach(u => {
         const el = document.getElementById(`presence-${u.id}`);
         if (!el) return;
-        const isOnline = !!state[u.id]; // presence key equals user.id for logged-in users
+        const isOnline = !!state[u.id];
         el.classList.toggle("hidden", !isOnline);
       });
     }
 
-    // Events
+    // -------- UNREAD COUNTS --------
+    function updateUnreadBadge(peerId) {
+      const n = unreadCounts[peerId] || 0;
+      const el = document.getElementById(`unread-${peerId}`);
+      if (!el) return;
+      if (n > 0) {
+        el.textContent = n > 99 ? "99+" : String(n);
+        el.classList.remove("hidden");
+      } else {
+        el.classList.add("hidden");
+      }
+    }
+
+    function renderUnreadBadges() {
+      users.forEach(u => updateUnreadBadge(u.id));
+    }
+
+    function minLastReadForAll() {
+      const vals = Object.values(lastReads);
+      if (!vals.length) return EPOCH;
+      let min = vals[0];
+      for (const v of vals) if (new Date(v) < new Date(min)) min = v;
+      return min;
+    }
+
+    // Pull all messages to me since the earliest lastRead, then count per-sender in JS
+    async function refreshUnreadCounts() {
+      if (!me) return;
+      // init zero for all list users so badges hide if none
+      users.forEach(u => unreadCounts[u.id] = 0);
+
+      const since = minLastReadForAll();
+      const { data, error } = await supabase
+        .from('messages')
+        .select('sender_id, recipient_id, created_at')
+        .eq('recipient_id', me.id)
+        .gt('created_at', since)
+        .order('created_at', { ascending: false })
+        .limit(2000); // demo-safe; raise if you expect heavy traffic
+      if (error) { console.error(error); renderUnreadBadges(); return; }
+
+      for (const m of (data || [])) {
+        // Only count if it's newer than this sender's lastRead
+        if (new Date(m.created_at) > new Date(getLastRead(m.sender_id))) {
+          unreadCounts[m.sender_id] = (unreadCounts[m.sender_id] || 0) + 1;
+        }
+      }
+      renderUnreadBadges();
+    }
+
+    // -------- Events --------
     loginBtn.addEventListener("click", async () => {
       try {
         const u = await ensureUsername(usernameInput.value);
@@ -295,6 +376,7 @@
         await loadUsers();
         setupPresence();
         enableComposer(!!activePeer);
+        await refreshUnreadCounts();
       } catch (e) {
         alert(e.message || "Unable to set username.");
       }
@@ -319,6 +401,7 @@
       await loadUsers();
       setupPresence();
       enableComposer(false);
+      await refreshUnreadCounts();
     })();
   </script>
 </body>
